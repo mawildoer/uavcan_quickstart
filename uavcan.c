@@ -7,51 +7,63 @@
 
 #include "uavcan.h"
 
+static O1HeapInstance* uavcan_heap;
+CanardInstance uavcan_canard;
+static uint8_t uavcan_heap_base[UAVCAN_HEAP_SIZE] __attribute__ ((aligned (O1HEAP_ALIGNMENT)));
+static FDCAN_HandleTypeDef* can_ins;
 
-int32_t UavcanLengthToDlc(size_t length) {
+static int32_t uavcanLengthToDlc(size_t length) {
   return CanardCANLengthToDLC[length] << 16;
 }
 
-size_t UavcanDlcToLength(uint32_t st_dlc) {
+static size_t uavcanDlcToLength(uint32_t st_dlc) {
   return CanardCANDLCToLength[st_dlc >> 16];
 }
 
-void* uavcanMemAllocate(CanardInstance* const ins, const size_t amount)
-{
-    return o1heapAllocate(((UavcanInstance*)(ins->user_reference))->heap, amount);
+static void* uavcanMemAllocate(CanardInstance* const ins, const size_t amount) {
+  (void) ins;
+  return o1heapAllocate(uavcan_heap, amount);
 }
 
-void uavcanMemFree(CanardInstance* const ins, void* const pointer)
-{
-    o1heapFree(((UavcanInstance*)(ins->user_reference))->heap, pointer);
+static void uavcanMemFree(CanardInstance* const ins, void* const pointer) {
+  (void) ins;
+  o1heapFree(uavcan_heap, pointer);
 }
 
-UavcanInstance uavcanInit(const size_t heap_size, size_t mtu_bytes) {
-  uint8_t heap_base[heap_size] __attribute__ ((aligned (O1HEAP_ALIGNMENT)));
-  const CanardInstance canard = canardInit(&uavcanMemAllocate, &uavcanMemFree);
+void uavcanInit(FDCAN_HandleTypeDef* lcan_ins) {
+  uavcan_canard = canardInit(&uavcanMemAllocate, &uavcanMemFree);
+  uavcan_heap = o1heapInit(uavcan_heap_base, UAVCAN_HEAP_SIZE, NULL, NULL);
+  can_ins = lcan_ins;
+}
 
-  UavcanInstance ins = {
-      .heap = o1heapInit(heap_base, heap_size, NULL, NULL),
-      .canard = &canard,
-      .message_transfer_id = 0
+void uavcanSetNodeID(CanardNodeID id) {
+  uavcan_canard.node_id = id;
+}
+
+static bool canTx(const CanardFrame* txf) {
+  const FDCAN_TxHeaderTypeDef TxHeader = {
+      .Identifier = txf->extended_can_id,
+      .IdType = FDCAN_EXTENDED_ID,
+      .TxFrameType = FDCAN_DATA_FRAME,
+      .DataLength = uavcanLengthToDlc(txf->payload_size),
+      .ErrorStateIndicator = FDCAN_ESI_ACTIVE,
+      .BitRateSwitch = FDCAN_BRS_ON,
+      .FDFormat = FDCAN_FD_CAN,
+      .TxEventFifoControl = FDCAN_NO_TX_EVENTS,
+      .MessageMarker = 0
   };
 
-  ins.canard->user_reference = (void*)&ins;
-  ins.canard->mtu_bytes = mtu_bytes;
+  return (HAL_FDCAN_AddMessageToTxFifoQ(can_ins, &TxHeader, txf->payload) == HAL_OK);
 }
 
-void uavcanSetNodeID(UavcanInstance* ins, CanardNodeID id) {
-  ins->canard->node_id = id;
-}
-
-void uavcanCanardProcess(const UavcanInstance* ins) {
-  for (const CanardFrame *txf = NULL; (txf = canardTxPeek(ins->canard)) != NULL;) { // Look at the top of the TX queue.
-      if (txf->timestamp_usec > getCurrentMicroseconds() || txf->timestamp_usec == 0) { // Ensure TX deadline not expired.
-        if (!(ins->canTxFunc(txf))) { // Send the frame. Redundant interfaces may be used here.
+void uavcanCanardProcess(void) {
+  for (const CanardFrame *txf = NULL; (txf = canardTxPeek(&uavcan_canard)) != NULL;) { // Look at the top of the TX queue.
+      if (txf->timestamp_usec > HAL_GetTick() * 1000 || txf->timestamp_usec == 0) { // Ensure TX deadline not expired.
+        if (!(canTx(txf))) { // Send the frame. Redundant interfaces may be used here.
           break;                // If the driver is busy, break and retry later.
         }
       }
-      canardTxPop(ins->canard); // Remove the frame from the queue after it's transmitted.
-      uavcan_ins.memory_free(&uavcan_ins, (CanardFrame*) txf); // Deallocate the dynamic memory afterwards.
+      canardTxPop(&uavcan_canard); // Remove the frame from the queue after it's transmitted.
+      uavcan_canard.memory_free(&uavcan_canard, (CanardFrame*) txf); // Deallocate the dynamic memory afterwards.
     }
 }

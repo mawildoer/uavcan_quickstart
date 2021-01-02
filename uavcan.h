@@ -13,27 +13,18 @@
 extern "C" {
 #endif
 
+#define UAVCAN_HEAP_SIZE 4096
+
 #include "canard.h"
 #include "o1heap.h"
-#include "stm32g4xx_hal_fdcan.h"
+#include "stm32g4xx_hal.h"
 
-typedef void (*UavcanTx)(const CanardFrame* ins);
+extern CanardInstance uavcan_canard;
 
-int32_t UavcanLengthToDlc(size_t length);
-size_t UavcanDlcToLength(uint32_t st_dlc);
+void uavcanInit(FDCAN_HandleTypeDef* lcan_ins);
 
-typedef struct UavcanInstance {
-  const O1HeapInstance* heap;
-  const CanardInstance* canard;
-
-  UavcanTx canTxFunc;
-
-  uint8_t message_transfer_id;
-} UavcanInstance;
-
-UavcanInstance uavcanInit(const size_t heap_size);
-
-void uavcanSetNodeID(UavcanInstance* ins, uint16_t id);
+void uavcanSetNodeID(CanardNodeID id);
+void uavcanCanardProcess(void);
 
 #ifdef __cplusplus
 }
